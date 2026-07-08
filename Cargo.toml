@@ -1,0 +1,50 @@
+[package]
+name = "fps_paintball_wildwest"
+version = "0.1.0"
+edition = "2021"
+authors = ["Wild West Paintball FPS"]
+description = "3D first-person paintball game built with Bevy"
+
+[dependencies]
+# Bevy 0.14.2 ist die letzte stabile Version, die auf Rust 1.96 zuverlaessig baut.
+# Features:
+#   - "bevy_asset"       : Standard-Asset-Loader (GLB, Texturen, Fonts)
+#   - "bevy_gltf"        : .glb / .gltf Loader (fuer Waffen und importierte Level-Geometrie)
+#   - "bevy_render"      : Renderer (stellt auch `shape` und Primitive-Meshes bereit)
+#   - "bevy_pbr"         : PBR-Materialien
+#   - "bevy_text"        : Text-Meshes
+#   - "bevy_ui"          : UI (NodeBundle, Style, TextBundle, Val, FlexDirection, ...)
+#   - "bevy_diagnostic"  : FrameTimeDiagnosticsPlugin fuer FPS-Zaehler im HUD
+#   - "png"              : PNG-Decoder fuer Texturen (Fonts, Decals)
+#   - "x11"              : Linux-Fenster (WSL)
+bevy = { version = "0.14.2", default-features = false, features = [
+    "bevy_asset",
+    "bevy_gltf",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_winit",
+    "bevy_core_pipeline",
+    "default_font",
+    "png",
+    "jpeg",
+    "tonemapping_luts",
+    "x11",
+] }
+
+# Wir nutzen `image` direkt fuer den Screenshot-Pfad.
+image = "0.24"
+
+# FBX-Strategie: Die .fbx-Dateien aus "Low Poly Wild West/" werden zur Laufzeit /
+# Buildzeit in .glb konvertiert (siehe tools/convert_fbx_README.md) und das Spiel
+# laedt ausschliesslich .glb. Damit sind wir unabhaengig von experimentellen
+# bevy_fbx-Crates, die oft kaputt sind. Siehe assets/manifest.json fuer die
+# Mapping-Tabelle (Original-FBX -> konvertierter GLB-Stub).
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
