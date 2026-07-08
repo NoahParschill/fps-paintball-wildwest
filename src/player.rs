@@ -150,6 +150,7 @@ pub fn spawn_player(mut commands: Commands) {
                 eye_height: EYE_STAND,
                 crouch_blend: 0.0,
             },
+            crate::ai::Health::new(100.0),
         ))
         .id();
 

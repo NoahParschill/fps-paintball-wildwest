@@ -13,6 +13,7 @@ pub struct AiPlugin;
 impl Plugin for AiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BotConfig>()
+            .init_resource::<Score>()
             .add_systems(Startup, spawn_bots)
             .add_systems(Update, (bot_state_machine, bot_movement, bot_shoot));
     }
@@ -37,7 +38,36 @@ pub struct Bot {
     pub target_cover: Option<Vec3>,
     pub patrol_target: Vec3,
     pub fire_cooldown: f32,
+    /// Eindeutige ID pro Bot, damit Friendly-Fire moeglich ist
+    /// (Bot schiesst andere Bots nicht ab).
+    pub id: u32,
 }
+
+/// Health-Komponente fuer Spieler + Bots. `current <= 0` = Tod.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Health {
+    pub current: f32,
+    pub max: f32,
+}
+
+impl Health {
+    pub fn new(max: f32) -> Self {
+        Self { current: max, max }
+    }
+    pub fn damage(&mut self, amount: f32) {
+        self.current = (self.current - amount).max(0.0);
+    }
+    pub fn is_dead(&self) -> bool {
+        self.current <= 0.0
+    }
+    pub fn ratio(&self) -> f32 {
+        if self.max <= 0.0 { 0.0 } else { self.current / self.max }
+    }
+}
+
+/// Globale Score-Anzeige. Wird vom HUD ausgelesen.
+#[derive(Resource, Debug, Default)]
+pub struct Score(pub u32);
 
 /// Konfiguration: Anzahl Bots. Wird vom Spieler ueber Zifferntasten geaendert.
 #[derive(Resource, Debug, Clone, Copy)]
@@ -78,7 +108,9 @@ fn spawn_bots(
                 target_cover: None,
                 patrol_target: pos + Vec3::new(5.0, 0.0, 0.0),
                 fire_cooldown: 2.0,
+                id: i as u32 + 1,
             },
+            Health::new(100.0),
         ));
     }
 }
@@ -139,13 +171,17 @@ fn bot_movement(mut bots: Query<(&mut Bot, &mut Transform)>, time: Res<Time>) {
 
 fn bot_shoot(
     mut commands: Commands,
-    mut bots: Query<(&Transform, &mut Bot)>,
+    mut bots: Query<(Entity, &Transform, &mut Bot, &mut Health)>,
     player: Query<&Transform, With<Player>>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (bot_tf, mut bot) in &mut bots {
+    for (entity, bot_tf, mut bot, mut bot_hp) in &mut bots {
+        if bot_hp.is_dead() {
+            // Tote Bots schiessen nicht mehr.
+            continue;
+        }
         if bot.state != BotState::Attack {
             continue;
         }
@@ -169,6 +205,9 @@ fn bot_shoot(
             dir * 30.0,
             // Bots schiessen rote Paintballs.
             Color::rgb(0.95, 0.20, 0.10),
+            crate::weapon::Owner::Bot(bot.id),
         );
+        // Vermeide "unused variable"-Warnung.
+        let _ = entity;
     }
 }

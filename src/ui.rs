@@ -14,7 +14,7 @@ impl Plugin for UiPlugin {
         app.init_resource::<HudState>()
             .init_resource::<FpsTracker>()
             .add_systems(Startup, setup_hud)
-            .add_systems(Update, (update_fps, update_ammo_text, update_weapon_name_text));
+            .add_systems(Update, (update_fps, update_ammo_text, update_weapon_name_text, update_health_hud));
     }
 }
 
@@ -24,6 +24,8 @@ pub struct HudState {
     pub current_ammo: u32,
     pub max_ammo: u32,
     pub reserve: u32,
+    pub health_ratio: f32,
+    pub score: u32,
 }
 
 #[derive(Resource, Debug)]
@@ -57,6 +59,12 @@ struct WeaponSilhouette;
 
 #[derive(Component)]
 struct ControlsPanel;
+
+#[derive(Component)]
+struct HealthBar;
+
+#[derive(Component)]
+struct ScoreText;
 
 const CONTROL_ROWS: &[(&str, &str)] = &[
     ("WASD", "Bewegen"),
@@ -132,6 +140,32 @@ fn setup_hud(mut commands: Commands) {
                     },
                 ),
                 WeaponSilhouette,
+            ));
+            // Health-Bar (gruener Balken der mit HP schrumpft).
+            parent.spawn((
+                NodeBundle {
+                    style: Style {
+                        width: Val::Px(180.0),
+                        height: Val::Px(10.0),
+                        margin: UiRect::top(Val::Px(6.0)),
+                        ..default()
+                    },
+                    background_color: Color::rgba(0.20, 0.05, 0.05, 0.85).into(),
+                    ..default()
+                },
+                HealthBar,
+            ));
+            // Score-Anzeige.
+            parent.spawn((
+                TextBundle::from_section(
+                    "Kills: 0",
+                    TextStyle {
+                        font: font.clone(),
+                        font_size: 18.0,
+                        color: Color::rgb(0.95, 0.85, 0.55),
+                    },
+                ),
+                ScoreText,
             ));
         });
 
@@ -222,6 +256,26 @@ fn update_weapon_name_text(
     }
     for mut t in &mut q_silh {
         t.sections[0].value = ascii_silhouette(state.active.display());
+    }
+}
+
+/// Aktualisiert Health-Bar (innerhalb des HealthBar-Containers) und
+/// Score-Text. Wir lesen Spieler-HP + Score aus dem Resource.
+fn update_health_hud(
+    player_q: Query<&crate::ai::Health, With<crate::player::Player>>,
+    score: Res<crate::ai::Score>,
+    mut health_q: Query<&mut Style, With<HealthBar>>,
+    mut score_q: Query<&mut Text, (With<ScoreText>, Without<WeaponNameText>)>,
+) {
+    let ratio = player_q
+        .get_single()
+        .map(|h| h.ratio())
+        .unwrap_or(1.0);
+    for mut style in &mut health_q {
+        style.width = Val::Px(180.0 * ratio);
+    }
+    for mut t in &mut score_q {
+        t.sections[0].value = format!("Kills: {}", score.0);
     }
 }
 

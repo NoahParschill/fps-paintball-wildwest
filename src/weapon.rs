@@ -196,12 +196,21 @@ impl Default for WeaponState {
     }
 }
 
+/// Wer hat geschossen? Wichtig fuer Friendly-Fire, Score und
+/// Traegerfarbe der Splatter-Decals.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    Player,
+    Bot(u32),
+}
+
 #[derive(Component, Debug)]
 pub struct Paintball {
     pub velocity: Vec3,
     pub gravity_drop: f32,
     pub color: Color,
     pub lifetime: f32,
+    pub owner: Owner,
 }
 
 #[derive(Component, Debug)]
@@ -214,6 +223,16 @@ pub struct PaintballTrail {
 #[derive(Component, Debug)]
 pub struct SplatterDecal {
     pub lifetime: f32,
+}
+
+/// Welche Surface hat ein Paintball getroffen? Wichtig fuer
+/// Splatter-Groesse und Health-Damage.
+#[derive(Debug, Clone, Copy)]
+enum HitKind {
+    Bot(bevy::ecs::entity::Entity),
+    Player,
+    Cover,
+    Ground,
 }
 
 #[derive(Component, Debug)]
@@ -563,6 +582,7 @@ fn shoot_input(
             muzzle,
             dir * wt.muzzle_speed(),
             paint_color,
+            crate::weapon::Owner::Player,
         );
         // Kein separater Tracer-Beam mehr: das per-Frame-Trail-Segment
         // in `update_paintballs` zeichnet die tatsaechliche Schussbahn
@@ -675,8 +695,11 @@ pub fn spawn_paintball(
     pos: Vec3,
     vel: Vec3,
     color: Color,
+    owner: Owner,
 ) {
-    let mesh = meshes.add(Mesh::from(Sphere { radius: PAINTBALL_RADIUS }));
+    let mesh = meshes.add(Mesh::from(Sphere {
+        radius: PAINTBALL_RADIUS,
+    }));
     let material = materials.add(StandardMaterial {
         base_color: color,
         emissive: color.into(),
@@ -695,6 +718,7 @@ pub fn spawn_paintball(
             gravity_drop: PROJECTILE_GRAVITY,
             color,
             lifetime: PAINTBALL_LIFETIME,
+            owner,
         },
     ));
 }
@@ -749,6 +773,10 @@ fn update_paintballs(
         Query<&Cover>,
         Query<(Entity, &PaintballTrail)>,
     )>,
+    // Bots + Spieler als Capsule-Hitboxes.
+    mut bot_q: Query<(Entity, &Transform, &mut crate::ai::Health), With<crate::ai::Bot>>,
+    mut player_q: Query<(&Transform, &mut crate::ai::Health), With<crate::player::Player>>,
+    mut score: ResMut<crate::ai::Score>,
 ) {
     let dt = time.delta_seconds();
     let cover_positions: Vec<Vec3> = param_set.p1().iter().map(|c| c.position).collect();
@@ -763,50 +791,215 @@ fn update_paintballs(
         pb.lifetime -= dt;
         new_trails.push((prev, next, pb.color));
 
-        let mut hit: Option<(Vec3, Vec3)> = None;
-        for cp in &cover_positions {
-            let half = Vec3::new(1.0, 0.5, 0.2);
-            let min = *cp - half;
-            let max = *cp + half;
-            if next.x >= min.x
-                && next.x <= max.x
-                && next.y >= min.y
-                && next.y <= max.y
-                && next.z >= min.z
-                && next.z <= max.z
-            {
-                let dx_min = (next.x - min.x).abs();
-                let dx_max = (max.x - next.x).abs();
-                let dy_min = (next.y - min.y).abs();
-                let dy_max = (max.y - next.y).abs();
-                let dz_min = (next.z - min.z).abs();
-                let dz_max = (max.z - next.z).abs();
-                let n = if dx_min.min(dx_max) < dy_min.min(dy_max).min(dz_min.min(dz_max)) {
-                    if dx_min < dx_max { Vec3::new(-1.0, 0.0, 0.0) } else { Vec3::new(1.0, 0.0, 0.0) }
-                } else if dy_min.min(dy_max) < dz_min.min(dz_max) {
-                    if dy_min < dy_max { Vec3::new(0.0, -1.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) }
-                } else if dz_min < dz_max {
-                    Vec3::new(0.0, 0.0, -1.0)
-                } else {
-                    Vec3::new(0.0, 0.0, 1.0)
-                };
-                hit = Some((next, n));
-                break;
+        let mut hit: Option<(Vec3, Vec3, HitKind)> = None;
+
+        // Capsule-Kollision mit Bots. Capsule = Zylinder (Radius 0.34) +
+        // Halbkugeln an Ober-/Unterseite. Heuristik: AABB-Box um die
+        // Capsule (etwas groesser als die Kapsel selbst) reicht fuer
+        // Paintball-Treffer.
+        for (bot_entity, bot_tf, _bot_hp) in &bot_q {
+            // Friendly-Fire: Bot's eigenen Schuss nicht abprallen.
+            if let Owner::Bot(id) = pb.owner {
+                // Spieler-spezifische Bot-IDs gibts noch nicht; vorerst
+                // kein Friendly-Fire-Filter auf Bot-Bots.
+                let _ = (id, bot_entity);
+            }
+            let bot_pos = bot_tf.translation;
+            let capsule_half_height = 0.9;
+            let capsule_radius = 0.40;
+            let min_y = bot_pos.y - capsule_half_height - capsule_radius;
+            let max_y = bot_pos.y + capsule_half_height + capsule_radius;
+            let horiz_radius = capsule_radius;
+            if next.y < min_y || next.y > max_y {
+                continue;
+            }
+            let dx = next.x - bot_pos.x;
+            let dz = next.z - bot_pos.z;
+            let d_horiz = (dx * dx + dz * dz).sqrt();
+            if d_horiz > horiz_radius {
+                continue;
+            }
+            // Treffer: Normal = vom Bot-Mittelpunkt zum Trefferpunkt.
+            let mut normal = next - bot_pos;
+            if normal.length_squared() < 0.0001 {
+                normal = pb.velocity.normalize_or_zero();
+            }
+            normal = normal.normalize_or_zero();
+            hit = Some((next, normal, HitKind::Bot(bot_entity)));
+            break;
+        }
+
+        // Spieler-Kollision.
+        if hit.is_none() {
+            if let Ok((ppos, mut player_health)) = player_q.get_single_mut() {
+                if pb.owner != Owner::Player {
+                    let capsule_half_height = 0.9;
+                    let capsule_radius = 0.40;
+                    let min_y = ppos.translation.y - capsule_half_height - capsule_radius;
+                    let max_y = ppos.translation.y + capsule_half_height + capsule_radius;
+                    if next.y >= min_y && next.y <= max_y {
+                        let dx = next.x - ppos.translation.x;
+                        let dz = next.z - ppos.translation.z;
+                        if (dx * dx + dz * dz).sqrt() <= capsule_radius {
+                            let mut n = next - ppos.translation;
+                            if n.length_squared() < 0.0001 {
+                                n = pb.velocity.normalize_or_zero();
+                            }
+                            n = n.normalize_or_zero();
+                            hit = Some((next, n, HitKind::Player));
+                            // Schaden anwenden.
+                            let dmg = 12.0;
+                            player_health.damage(dmg);
+                            // Friendly-Fire Score: kein Score fuer Bot-Score.
+                        }
+                    }
+                }
             }
         }
 
-        if hit.is_none() && next.y < 0.1 {
-            hit = Some((next, Vec3::new(0.0, 1.0, 0.0)));
+        // Cover-Kollision.
+        if hit.is_none() {
+            for cp in &cover_positions {
+                let half = Vec3::new(1.0, 0.5, 0.2);
+                let min = *cp - half;
+                let max = *cp + half;
+                if next.x >= min.x
+                    && next.x <= max.x
+                    && next.y >= min.y
+                    && next.y <= max.y
+                    && next.z >= min.z
+                    && next.z <= max.z
+                {
+                    let dx_min = (next.x - min.x).abs();
+                    let dx_max = (max.x - next.x).abs();
+                    let dy_min = (next.y - min.y).abs();
+                    let dy_max = (max.y - next.y).abs();
+                    let dz_min = (next.z - min.z).abs();
+                    let dz_max = (max.z - next.z).abs();
+                    let n = if dx_min.min(dx_max) < dy_min.min(dy_max).min(dz_min.min(dz_max)) {
+                        if dx_min < dx_max { Vec3::new(-1.0, 0.0, 0.0) } else { Vec3::new(1.0, 0.0, 0.0) }
+                    } else if dy_min.min(dy_max) < dz_min.min(dz_max) {
+                        if dy_min < dy_max { Vec3::new(0.0, -1.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) }
+                    } else if dz_min < dz_max {
+                        Vec3::new(0.0, 0.0, -1.0)
+                    } else {
+                        Vec3::new(0.0, 0.0, 1.0)
+                    };
+                    hit = Some((next, n, HitKind::Cover));
+                    break;
+                }
+            }
         }
+
+        // Boden.
+        if hit.is_none() && next.y < 0.1 {
+            hit = Some((next, Vec3::new(0.0, 1.0, 0.0), HitKind::Ground));
+        }
+
         if pb.lifetime <= 0.0 && hit.is_none() {
             commands.entity(entity).despawn();
             continue;
         }
-        if let Some((pos, normal)) = hit {
-            spawn_splatter(&mut commands, &mut meshes, &mut materials, pos, normal, pb.color);
-            commands.entity(entity).despawn();
-        }
-    }
+
+        if let Some((pos, normal, kind)) = hit {
+            let big = matches!(kind, HitKind::Bot(_) | HitKind::Player);
+                let big = matches!(kind, HitKind::Bot(_) | HitKind::Player);
+                spawn_splatter(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    pos,
+                    normal,
+                    pb.color,
+                    big,
+                );
+                if big {
+                    // 3-4 kleine Satelliten-Spritzer um den Haupttreffer.
+                    for i in 0..3 {
+                        let angle = (i as f32) * std::f32::consts::TAU / 3.0
+                            + (entity.to_bits() as f32 * 0.13).sin();
+                        let r = 0.18 + (i as f32) * 0.04;
+                        let off = Vec3::new(angle.cos() * r, 0.0, angle.sin() * r);
+                        spawn_splatter(
+                            &mut commands,
+                            &mut meshes,
+                            &mut materials,
+                            pos + off,
+                            normal,
+                            pb.color,
+                            false,
+                        );
+                    }
+                }
+
+                // Schaden + Tod-Handling.
+                let dmg = 12.0;
+                match kind {
+                    HitKind::Bot(bot_entity) => {
+                        if pb.owner == Owner::Player {
+                            // Spieler schiesst Bot: durch Bot_q iterieren,
+                            // weil wir das Entity schon in HitKind halten.
+                            let mut killed = false;
+                            if let Ok((_e, _tf, mut hp)) = bot_q.get_mut(bot_entity) {
+                                hp.damage(dmg);
+                                if hp.is_dead() {
+                                    killed = true;
+                                }
+                            }
+                            if killed {
+                                score.0 += 1;
+                                // Grosser Haupt-Splatter und 5 zusaetzliche
+                                // Satelliten am Boden (Bot faellt).
+                                spawn_splatter(
+                                    &mut commands,
+                                    &mut meshes,
+                                    &mut materials,
+                                    pos + Vec3::new(0.0, 0.05, 0.0),
+                                    Vec3::Y,
+                                    pb.color,
+                                    true,
+                                );
+                                for i in 0..5 {
+                                    let a = (i as f32) * std::f32::consts::TAU / 5.0
+                                        + (pos.x * 3.7).sin();
+                                    let r = 0.35 + (i as f32) * 0.06;
+                                    spawn_splatter(
+                                        &mut commands,
+                                        &mut meshes,
+                                        &mut materials,
+                                        pos + Vec3::new(a.cos() * r, 0.05, a.sin() * r),
+                                        Vec3::Y,
+                                        pb.color,
+                                        true,
+                                    );
+                                }
+                                // Bot-Entity despawnen.
+                                commands.entity(bot_entity).despawn();
+                            }
+                        }
+                    }
+                    HitKind::Player => {
+                        // Schaden wurde schon im Kollisions-Check oben
+                        // angewendet (damit wir den Borrow frueh wieder
+                        // freigeben koennen). Hier nur Tod-Handling + Score.
+                        let mut dead = false;
+                        if let Ok((_tf, hp)) = player_q.get_single() {
+                            if hp.is_dead() {
+                                dead = true;
+                            }
+                        }
+                        if dead {
+                            // Spieler-Tod: Score-Bonus fuer Bot.
+                            if let Owner::Bot(_) = pb.owner {
+                                score.0 += 1;
+                            }
+                        }
+                    }
+                    HitKind::Cover | HitKind::Ground => {}
+                }
+                commands.entity(entity).despawn();
+            }
+            }
 
     for (a, b, color) in new_trails {
         spawn_trail_segment(&mut commands, &mut meshes, &mut materials, a, b, color);
@@ -915,8 +1108,10 @@ fn spawn_splatter(
     pos: Vec3,
     normal: Vec3,
     color: Color,
+    big: bool,
 ) {
-    let mesh = meshes.add(Mesh::from(Plane3d::new(Vec3::Z, Vec2::splat(0.18))));
+    let size = if big { 0.32 } else { 0.18 };
+    let mesh = meshes.add(Mesh::from(Plane3d::new(Vec3::Z, Vec2::splat(size))));
     let mat = materials.add(StandardMaterial {
         base_color: color,
         unlit: true,
@@ -924,11 +1119,17 @@ fn spawn_splatter(
         ..default()
     });
     let rot = Quat::from_rotation_arc(Vec3::Z, normal);
+    // Etwas Variation in der Rotation, damit aufeinanderfolgende
+    // Splatter auf derselben Surface nicht exakt gleich aussehen.
+    let jitter = Quat::from_rotation_z(
+        (pos.x * 7.3 + pos.y * 11.1 + pos.z * 5.7).sin() * 0.3,
+    );
     commands.spawn((
         PbrBundle {
             mesh,
             material: mat,
-            transform: Transform::from_translation(pos + normal * 0.01).with_rotation(rot),
+            transform: Transform::from_translation(pos + normal * 0.015)
+                .with_rotation(rot * jitter),
             ..default()
         },
         SplatterDecal { lifetime: 30.0 },
