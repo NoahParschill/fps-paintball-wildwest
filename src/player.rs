@@ -242,6 +242,7 @@ fn player_movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut query: Query<(&mut Transform, &mut Velocity, &PlayerLook, &mut PlayerStance), With<Player>>,
+    cover_q: Query<(&Transform, &crate::world::Cover)>,
 ) {
     let Ok((mut transform, mut vel, _look, mut stance)) = query.get_single_mut() else {
         return;
@@ -366,7 +367,12 @@ fn player_movement(
     }
 
     // Integriere Position.
-    transform.translation += vel.linear * time.delta_seconds();
+    let mut next_pos = transform.translation + vel.linear * time.delta_seconds();
+
+    // Cover-Barrikaden-Kollision: Spieler wird aus AABBs rausgeschoben.
+    next_pos = resolve_cover_collision(transform.translation, next_pos, &cover_q, 0.30);
+
+    transform.translation = next_pos;
 
     // Snap auf Bodenhoehe: y = eye_height (aktuell interpoliert).
     let target_y = stance.eye_height;
@@ -434,4 +440,57 @@ fn update_player_pose(
     if (stance.eye_height - transform.translation.y).abs() > 0.0001 {
         transform.translation.y = stance.eye_height;
     }
+}
+
+/// Schiebt `next_pos` aus jedem Cover-AABB raus, der ueberlappt.
+/// `radius` ist der Zylinder-Radius des Spielers. Maximal 4
+/// Push-Out-Versuche.
+pub fn resolve_cover_collision(
+    _prev: Vec3,
+    mut next_pos: Vec3,
+    covers: &Query<(&Transform, &crate::world::Cover)>,
+    radius: f32,
+) -> Vec3 {
+    for _iteration in 0..4 {
+        let mut pushed = false;
+        for (cover_tf, cover) in covers.iter() {
+            let pos = cover_tf.translation;
+            let he = cover.half_extents;
+            // Einfacher AABB-vs-Point-Test mit Spieler-Radius als Padding.
+            let min = pos - he - Vec3::new(radius, 0.0, radius);
+            let max = pos + he + Vec3::new(radius, radius * 2.0, radius);
+            if next_pos.x >= min.x && next_pos.x <= max.x
+                && next_pos.y >= min.y && next_pos.y <= max.y
+                && next_pos.z >= min.z && next_pos.z <= max.z
+            {
+                // Pushe entlang der kuerzesten Achse.
+                let dx_min = (next_pos.x - min.x).abs();
+                let dx_max = (max.x - next_pos.x).abs();
+                let dy_min = (next_pos.y - min.y).abs();
+                let dy_max = (max.y - next_pos.y).abs();
+                let dz_min = (next_pos.z - min.z).abs();
+                let dz_max = (max.z - next_pos.z).abs();
+
+                let smallest = [
+                    (dx_min, -1.0_f32, 0.0, 0.0),
+                    (dx_max, 1.0, 0.0, 0.0),
+                    (dy_min, 0.0, -1.0, 0.0),
+                    (dy_max, 0.0, 1.0, 0.0),
+                    (dz_min, 0.0, 0.0, -1.0),
+                    (dz_max, 0.0, 0.0, 1.0),
+                ]
+                .iter()
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .copied()
+                .unwrap_or((dy_min, 0.0, 0.0, 0.0));
+
+                next_pos += Vec3::new(smallest.1, smallest.2, smallest.3) * smallest.0;
+                pushed = true;
+            }
+        }
+        if !pushed {
+            break;
+        }
+    }
+    next_pos
 }

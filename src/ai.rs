@@ -141,7 +141,11 @@ fn bot_state_machine(mut bots: Query<&mut Bot>, player: Query<&Transform, With<P
     }
 }
 
-fn bot_movement(mut bots: Query<(&mut Bot, &mut Transform)>, time: Res<Time>) {
+fn bot_movement(
+    mut bots: Query<(&mut Bot, &mut Transform)>,
+    time: Res<Time>,
+    cover_q: Query<(&Transform, &crate::world::Cover)>,
+) {
     for (mut bot, mut tf) in &mut bots {
         let target = match bot.state {
             BotState::Patrol => bot.patrol_target,
@@ -159,7 +163,10 @@ fn bot_movement(mut bots: Query<(&mut Bot, &mut Transform)>, time: Res<Time>) {
         let dist = dir.length();
         if dist > 0.5 {
             let step = dir.normalize() * 2.0 * time.delta_seconds();
-            tf.translation += step;
+            let next = tf.translation + step;
+            tf.translation = crate::player::resolve_cover_collision(
+                tf.translation, next, &cover_q, 0.35,
+            );
             // Richtung grob ausrichten.
             let look = (target - tf.translation).with_y(0.0).normalize_or_zero();
             if look != Vec3::ZERO {

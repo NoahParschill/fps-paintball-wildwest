@@ -16,10 +16,12 @@ use bevy::prelude::*;
 /// Marker-Komponente: Deckungs-Stelle im Level.
 ///
 /// Wird vom KI-System (`ai.rs`) genutzt, um Bots in die
-/// naechste Barrikade fliehen zu lassen.
+/// naechste Barrikade fliehen zu lassen. `half_extents` wird
+/// fuer Character-vs-Cover-Kollision benoetigt.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Cover {
     pub position: Vec3,
+    pub half_extents: Vec3,
 }
 
 pub struct WorldPlugin;
@@ -1196,7 +1198,10 @@ fn spawn_cover_barricades(
                 ..default()
             })
             .id();
-        commands.entity(entity).insert(Cover { position: pos });
+        commands.entity(entity).insert(Cover {
+            position: pos,
+            half_extents: Vec3::new(0.8, 0.5, 0.2),
+        });
     }
 }
 
